@@ -93,6 +93,33 @@ void cube_set_i2so_output_muted(int muted) {
     }
 }
 
+/* Write the SHARED system volume: cubevol's persistentmem slot (what the
+ * physical volume buttons use) + the I2SO hardware volume (same ioctl a
+ * cubevol button press applies, via the existing helper above) + legacy
+ * cubegm/sndgain.txt for standalone frontends (pcsx4all, lgpt).  After
+ * this, Settings' Volume slider and the physical buttons are one and the
+ * same value, applied in real time.  persistentmem is EEPROM-like: write
+ * ONLY on real change, never per frame. */
+void cube_pmem_volume_write(int level) {
+    if (level < 0)   level = 0;
+    if (level > 100) level = 100;
+    if (cube_pmem_volume_read() == level) return;   /* already in sync */
+    int fd = open("/dev/persistentmem", O_RDWR);
+    if (fd >= 0) {
+        unsigned char buf[260] = {0};
+        buf[0] = (unsigned char)level;
+        struct pmem_req req = { 3, 0, 260, 0, buf };
+        (void)!ioctl(fd, PMEM_SET_BACKLIGHT, &req);  /* 0x800c2603 SET */
+        close(fd);
+    }
+    /* Mirror to the I2SO hardware path exactly like a cubevol button press,
+     * so the new level is audible immediately (and Volume 0 truly silences:
+     * the DAC/amp path is muted, not just the samples). */
+    cube_set_i2so_volume(level);
+    FILE *f = fopen("/mnt/sdcard/cubegm/sndgain.txt", "w");
+    if (f) { fprintf(f, "%d\n", level); fclose(f); }
+}
+
 #include <stdlib.h>
 
 void fb1_set_visible(int visible) {

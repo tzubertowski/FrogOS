@@ -16,6 +16,12 @@ int cube_pmem_backlight_read(void);
 /* Read cubevol's persistentmem-stored snd volume (0..100-ish), -1 on failure. */
 int cube_pmem_volume_read(void);
 
+/* Write the SHARED system volume: cubevol's persistentmem slot (the physical
+ * volume buttons' value) + I2SO hardware volume + legacy cubegm/sndgain.txt.
+ * Makes Settings' Volume slider and the console's physical volume buttons one
+ * and the same value, applied in real time. Writes EEPROM only on real change. */
+void cube_pmem_volume_write(int level);
+
 /* Sync cubevol's persistentmem-stored backlight to `level` (0..100) so its
  * delayed startup apply shows the right brightness. Writes EEPROM only on real
  * change — call on brightness change / boot, NOT every frame. */

@@ -1111,12 +1111,12 @@ static void mkdir_p(const char *path) {
 }
 
 static void settings_write_volume(void) {
-    FILE *vf = fopen("/mnt/sdcard/cubegm/sndgain.txt", "w");
-    if (!vf) return;
-    fprintf(vf, "%d\n", settings_volume);
-    fflush(vf);
-    fsync(fileno(vf));
-    fclose(vf);
+    /* The shared system volume lives in cubevol's persistentmem slot (the
+     * physical volume buttons' value); writing it also mirrors to the I2SO
+     * hardware path and legacy sndgain.txt for standalone frontends. */
+    if (settings_volume < 0)   settings_volume = 0;
+    if (settings_volume > 100) settings_volume = 100;
+    cube_pmem_volume_write(settings_volume);
 }
 
 static void settings_apply(void) {
@@ -1169,6 +1169,8 @@ static void settings_preview_row(const SRow *r) {
             cube_set_backlight(settings_brightness);
         else if (r->val == &settings_background_dim)
             banner_set_dim(settings_background_dim);
+        else if (r->val == &settings_volume)
+            settings_write_volume();   /* shared volume: live on every step */
         break;
     case RT_TOGGLE:
         if (r->val == &settings_anim) banner_set_anim(settings_anim);
@@ -1286,6 +1288,12 @@ static void settings_load_file(void) {
         }
     }
     fclose(f);
+    /* The shared system volume (cubevol persistentmem - what the PHYSICAL
+     * volume buttons last set) always wins over our saved copy: the user
+     * may have changed it with the buttons since the last Settings visit. */
+    int shared_vol = cube_pmem_volume_read();
+    if (shared_vol >= 0 && shared_vol <= 100)
+        settings_volume = shared_vol;
 }
 
 /* The rootfs mdev hook mounts a connected OTG drive at /media/hdd. Check both
@@ -3226,22 +3234,30 @@ static void ui_toast_show(const char *text) {
 
 static void ui_menu_tick(void) {
     if (!settings_menu_sounds) return;
-    /* A deliberately quiet 12 ms square tick. The setting defaults off; unlike
-     * a sampled asset this costs no SD read and follows the frontend's mixer. */
-    static int16_t tick[530 * 2];
+    /* 60 ms tick (2646 samples @44.1 kHz). The SF-class frontend gates the
+     * speaker-amp line closed whenever no real audio flows, and the amp
+     * itself needs a few ms of live line before it reproduces anything -
+     * the old 12 ms blip died entirely inside that ramp-up and menu ticks
+     * were inaudible even though the samples reached the DAC. 60 ms matches
+     * the stock firmware's navigation blip (~74 ms Browsing.wav) and still
+     * reads as a short discrete click. Amplitude kept low; the fade avoids
+     * a DC click at both ends. */
+    static int16_t tick[2646 * 2];
     static int ready = 0;
     if (!ready) {
-        for (int i = 0; i < 530; i++) {
-            int16_t s = ((i / 25) & 1) ? 1100 : -1100;
-            int fade = 530 - i;
-            s = (int16_t)((int)s * fade / 530);
+        for (int i = 0; i < 2646; i++) {
+            int16_t s = ((i / 25) & 1) ? 900 : -900;
+            int fade = (i < 200) ? i : (2646 - i);
+            if (fade > 2000) fade = 2000;
+            if (fade < 1) fade = 1;
+            s = (int16_t)((int)s * fade / 2000);
             tick[i * 2] = tick[i * 2 + 1] = s;
         }
         ready = 1;
     }
-    if (audio_batch_cb) audio_batch_cb(tick, 530);
+    if (audio_batch_cb) audio_batch_cb(tick, 2646);
     else if (audio_cb)
-        for (int i = 0; i < 530; i++) audio_cb(tick[i * 2], tick[i * 2 + 1]);
+        for (int i = 0; i < 2646; i++) audio_cb(tick[i * 2], tick[i * 2 + 1]);
 }
 
 static void ui_transition_start(int direction) {
