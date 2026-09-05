@@ -3251,7 +3251,9 @@ static void ui_toast_show(const char *text) {
  * Frames are derived from the core's ACTIVE sample rate so a different
  * audio backend/rate keeps the same 60 ms duration. */
 #define UI_TICK_MS 60
-#define UI_TICK_MAX_FRAMES 48000   /* 1 s at any rate we would ever run */
+/* Cap sized for the longest plausible UI tick (200 ms @ 48 kHz = 9600), not
+ * the full second - static buffers are precious on these devices. */
+#define UI_TICK_MAX_FRAMES 9600
 
 static void ui_menu_tick(void) {
     if (!settings_menu_sounds) return;

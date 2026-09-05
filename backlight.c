@@ -11,7 +11,9 @@
  * /mnt/sdcard/log.txt exists (opt-in), so EEPROM write failures surface
  * in the field without adding per-boot SD wear. */
 static void cube_pmem_log(const char *what, int level, int err) {
-    if (!fopen("/mnt/sdcard/log.txt", "r")) return;
+    FILE *probe = fopen("/mnt/sdcard/log.txt", "r");
+    if (!probe) return;
+    fclose(probe);
     FILE *f = fopen("/mnt/sdcard/frogui_crash.log", "a");
     if (f) {
         fprintf(f, "cube_pmem: %s level=%d errno=%d (%s)\n",
