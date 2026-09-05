@@ -41,6 +41,9 @@
 
 #define SDCARD_BASE  "/mnt/sdcard"
 #define CORES_PATH   SDCARD_BASE "/cubegm/cores"
+/* Core audio rate (single source of truth: av_info AND the menu-tick length
+ * are both derived from this - see ui_menu_tick). */
+#define SAMPLE_RATE  44100
 /* roms root: resolved at init. Prefer roms/, accept ROMS/ (exfat-mounted cards
  * are case-sensitive on this kernel), create roms/ if neither exists, so the
  * menu ALWAYS has a valid root instead of NULL entries → SIGBUS addr=0. */
@@ -1113,10 +1116,13 @@ static void mkdir_p(const char *path) {
 static void settings_write_volume(void) {
     /* The shared system volume lives in cubevol's persistentmem slot (the
      * physical volume buttons' value); writing it also mirrors to the I2SO
-     * hardware path and legacy sndgain.txt for standalone frontends. */
+     * hardware path and legacy sndgain.txt for standalone frontends.  Only
+     * called on CONFIRMED adjustments (menu exit / boot apply): the slider's
+     * per-step path is the hardware-only preview (see settings_preview_row). */
     if (settings_volume < 0)   settings_volume = 0;
     if (settings_volume > 100) settings_volume = 100;
-    cube_pmem_volume_write(settings_volume);
+    if (cube_pmem_volume_write(settings_volume) < 0)
+        dbg("volume persist failed (pmem); hw level applied, stored value unchanged");
 }
 
 static void settings_apply(void) {
@@ -1170,7 +1176,11 @@ static void settings_preview_row(const SRow *r) {
         else if (r->val == &settings_background_dim)
             banner_set_dim(settings_background_dim);
         else if (r->val == &settings_volume)
-            settings_write_volume();   /* shared volume: live on every step */
+            /* Live preview ONLY (hardware mirror, no EEPROM write): the slider
+             * repeats many steps per adjustment and persistentmem is
+             * EEPROM-like - the durable pmem write happens once, when the
+             * adjustment is confirmed at menu exit (settings_save_file). */
+            cube_volume_preview(settings_volume);
         break;
     case RT_TOGGLE:
         if (r->val == &settings_anim) banner_set_anim(settings_anim);
@@ -3232,22 +3242,29 @@ static void ui_toast_show(const char *text) {
     ui_toast_frames = 90;   /* about 1.5 seconds at the presented 60 fps */
 }
 
+/* Measured on the R36SX amp: the speaker line needs several ms live before
+ * the amp reproduces, and the SF-class frontend feeds ~100 ms of silence
+ * runway before the first real chunk (see the picoarch speaker gate).  The
+ * minimum AUDIBLE tick measured on-device was ~60 ms of content; the stock
+ * firmware's own navigation blip is ~74 ms.  Anything shorter is swallowed
+ * by the ramp-up; anything much longer stops reading as a discrete click.
+ * Frames are derived from the core's ACTIVE sample rate so a different
+ * audio backend/rate keeps the same 60 ms duration. */
+#define UI_TICK_MS 60
+#define UI_TICK_MAX_FRAMES 48000   /* 1 s at any rate we would ever run */
+
 static void ui_menu_tick(void) {
     if (!settings_menu_sounds) return;
-    /* 60 ms tick (2646 samples @44.1 kHz). The SF-class frontend gates the
-     * speaker-amp line closed whenever no real audio flows, and the amp
-     * itself needs a few ms of live line before it reproduces anything -
-     * the old 12 ms blip died entirely inside that ramp-up and menu ticks
-     * were inaudible even though the samples reached the DAC. 60 ms matches
-     * the stock firmware's navigation blip (~74 ms Browsing.wav) and still
-     * reads as a short discrete click. Amplitude kept low; the fade avoids
-     * a DC click at both ends. */
-    static int16_t tick[2646 * 2];
+    static int16_t tick[UI_TICK_MAX_FRAMES * 2];
+    static int frames = 0;
     static int ready = 0;
-    if (!ready) {
-        for (int i = 0; i < 2646; i++) {
+    if (!ready || frames == 0) {
+        frames = (int)((double)SAMPLE_RATE * UI_TICK_MS / 1000.0 + 0.5);
+        if (frames < 16) frames = 16;             /* never degenerate */
+        if (frames > UI_TICK_MAX_FRAMES) frames = UI_TICK_MAX_FRAMES;
+        for (int i = 0; i < frames; i++) {
             int16_t s = ((i / 25) & 1) ? 900 : -900;
-            int fade = (i < 200) ? i : (2646 - i);
+            int fade = (i < 200) ? i : (frames - i);
             if (fade > 2000) fade = 2000;
             if (fade < 1) fade = 1;
             s = (int16_t)((int)s * fade / 2000);
@@ -3255,9 +3272,9 @@ static void ui_menu_tick(void) {
         }
         ready = 1;
     }
-    if (audio_batch_cb) audio_batch_cb(tick, 2646);
+    if (audio_batch_cb) audio_batch_cb(tick, frames);
     else if (audio_cb)
-        for (int i = 0; i < 2646; i++) audio_cb(tick[i * 2], tick[i * 2 + 1]);
+        for (int i = 0; i < frames; i++) audio_cb(tick[i * 2], tick[i * 2 + 1]);
 }
 
 static void ui_transition_start(int direction) {
@@ -4093,7 +4110,7 @@ void retro_get_system_av_info(struct retro_system_av_info *info) {
     info->geometry.max_height   = SCREEN_HEIGHT;
     info->geometry.aspect_ratio = (float)SCREEN_WIDTH / SCREEN_HEIGHT;
     info->timing.fps            = 60.0;
-    info->timing.sample_rate    = 44100.0;
+    info->timing.sample_rate    = (double)SAMPLE_RATE;
 }
 
 void retro_set_environment(retro_environment_t cb) {

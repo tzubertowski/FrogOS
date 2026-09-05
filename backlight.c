@@ -4,6 +4,21 @@
 #include <unistd.h>
 #include <sys/ioctl.h>
 #include <stdio.h>
+#include <errno.h>
+#include <string.h>
+
+/* Diagnostic log, mirroring FrogUI's dbg() convention: written only when
+ * /mnt/sdcard/log.txt exists (opt-in), so EEPROM write failures surface
+ * in the field without adding per-boot SD wear. */
+static void cube_pmem_log(const char *what, int level, int err) {
+    if (!fopen("/mnt/sdcard/log.txt", "r")) return;
+    FILE *f = fopen("/mnt/sdcard/frogui_crash.log", "a");
+    if (f) {
+        fprintf(f, "cube_pmem: %s level=%d errno=%d (%s)\n",
+                what, level, err, err ? strerror(err) : "ok");
+        fclose(f);
+    }
+}
 
 /* cubevol's persistentmem backlight slot (reverse-engineered from cubevol's
  * sysdata_get/set_backlight_value). Struct + ioctl cmds must match exactly. */
@@ -81,6 +96,14 @@ static void cube_set_i2so_volume(int level) {
     close(fd);
 }
 
+/* Live volume preview for the Settings slider: hardware mirror ONLY, no
+ * persistentmem / sndgain writes.  The slider calls this on every repeat
+ * step so the level is audible immediately, while the durable pmem write
+ * is deferred until the adjustment is confirmed (see cube_pmem_volume_write). */
+void cube_volume_preview(int level) {
+    cube_set_i2so_volume(level);
+}
+
 void cube_set_i2so_output_muted(int muted) {
     /* R36SX cubevol's api_set_i2so_gpio_mute exists but has no callers. Its
        real set_audio_mute path uses api_set_volume(0), so use that proven
@@ -99,25 +122,37 @@ void cube_set_i2so_output_muted(int muted) {
  * cubegm/sndgain.txt for standalone frontends (pcsx4all, lgpt).  After
  * this, Settings' Volume slider and the physical buttons are one and the
  * same value, applied in real time.  persistentmem is EEPROM-like: write
- * ONLY on real change, never per frame. */
-void cube_pmem_volume_write(int level) {
+ * ONLY on real change, never per step.  Returns 0 when the stored value
+ * was persisted (or already matched); -1 when persistentmem failed - the
+ * hardware mirror is still applied so the level is audible, but callers
+ * must not treat the level as persisted. */
+int cube_pmem_volume_write(int level) {
     if (level < 0)   level = 0;
     if (level > 100) level = 100;
-    if (cube_pmem_volume_read() == level) return;   /* already in sync */
+    if (cube_pmem_volume_read() == level) return 0;   /* already in sync */
+    int rv = -1;
     int fd = open("/dev/persistentmem", O_RDWR);
     if (fd >= 0) {
         unsigned char buf[260] = {0};
         buf[0] = (unsigned char)level;
         struct pmem_req req = { 3, 0, 260, 0, buf };
-        (void)!ioctl(fd, PMEM_SET_BACKLIGHT, &req);  /* 0x800c2603 SET */
+        if (ioctl(fd, PMEM_SET_BACKLIGHT, &req) == 0)
+            rv = 0;
+        else
+            cube_pmem_log("volume persist FAILED", level, errno);
         close(fd);
+    } else {
+        cube_pmem_log("volume persist FAILED (no pmem)", level, errno);
     }
     /* Mirror to the I2SO hardware path exactly like a cubevol button press,
      * so the new level is audible immediately (and Volume 0 truly silences:
-     * the DAC/amp path is muted, not just the samples). */
+     * the DAC/amp path is muted, not just the samples).  Applied even when
+     * the persistent write failed: the user hears what the slider shows;
+     * the failed STORED value is what the return code reports. */
     cube_set_i2so_volume(level);
     FILE *f = fopen("/mnt/sdcard/cubegm/sndgain.txt", "w");
     if (f) { fprintf(f, "%d\n", level); fclose(f); }
+    return rv;
 }
 
 #include <stdlib.h>
