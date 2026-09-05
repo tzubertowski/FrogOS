@@ -4607,14 +4607,21 @@ void retro_run(void) {
      * pmem value out from under us at any moment.  Poll it while the
      * Settings menu is open so the slider DISPLAY follows the buttons in
      * real time too - one value everywhere, whichever side changed it.
-     * (picoarch does the same for the in-game path; this covers the UI.) */
+     * (picoarch does the same for the in-game path; this covers the UI.)
+     * OWN-LAG GUARD: while the debounced slider path is catching up, pmem
+     * still holds OUR last committed level - reading it back would bounce
+     * the slider to stale values mid-adjustment (seen on-device as
+     * 50-45-45-45-40-45-40 when sliding fast).  A read that matches our own
+     * last commit is our lag, not a physical press: only adopt values that
+     * differ from BOTH the slider and our last commit. */
     if (settings_menu_active) {
         static long long volume_poll_ms = 0;
         long long now = monotonic_ms();
         if (now - volume_poll_ms >= 250) {
             volume_poll_ms = now;
             int shared = cube_pmem_volume_read();
-            if (shared >= 0 && shared <= 100 && shared != settings_volume) {
+            if (shared >= 0 && shared <= 100 &&
+                shared != settings_volume && shared != volume_committed_level) {
                 settings_volume = shared;
                 volume_committed_level = shared;   /* it is already stored */
             }
