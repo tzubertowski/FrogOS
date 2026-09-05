@@ -135,9 +135,15 @@ int cube_pmem_volume_write(int level) {
     int rv = -1;
     int fd = open("/dev/persistentmem", O_RDWR);
     if (fd >= 0) {
-        unsigned char buf[260] = {0};
-        buf[0] = (unsigned char)level;
-        struct pmem_req req = { 3, 0, 260, 0, buf };
+        /* Byte-exact with cubevol's avparam_save_volume (RE'd from the stock
+         * daemon): the volume node is addressed {flag=3,id=0} and written
+         * with len=1 - a SINGLE byte.  The avparam GET reads the whole
+         * 260-byte blob, but the SET that the physical buttons' daemon
+         * actually performs is len=1; a 260-byte blob SET never reaches the
+         * node cubevol reads, so the physical volume meter and the reboot
+         * value silently ignored slider writes (verified on-device). */
+        unsigned char byte = (unsigned char)level;
+        struct pmem_req req = { 3, 0, 1, 0, &byte };
         if (ioctl(fd, PMEM_SET_BACKLIGHT, &req) == 0)
             rv = 0;
         else
