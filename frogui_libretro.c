@@ -1116,9 +1116,11 @@ static void mkdir_p(const char *path) {
 static void settings_write_volume(void) {
     /* The shared system volume lives in cubevol's persistentmem slot (the
      * physical volume buttons' value); writing it also mirrors to the I2SO
-     * hardware path and legacy sndgain.txt for standalone frontends.  Only
-     * called on CONFIRMED adjustments (menu exit / boot apply): the slider's
-     * per-step path is the hardware-only preview (see settings_preview_row). */
+     * hardware path and legacy sndgain.txt for standalone frontends.
+     * Called on confirmed adjustments (menu exit / boot apply) AND as the
+     * debounced commit of the live slider path (see settings_preview_row):
+     * cube_pmem_volume_write itself skips the EEPROM write when the level
+     * is unchanged, so repeated calls at the same value are free. */
     if (settings_volume < 0)   settings_volume = 0;
     if (settings_volume > 100) settings_volume = 100;
     if (cube_pmem_volume_write(settings_volume) < 0)
@@ -1155,11 +1157,38 @@ static void settings_apply(void) {
        Zeroed samples leave the DAC/amp live; mute its real I2SO output instead. */
     cube_set_i2so_output_muted(settings_menu_sounds ? 0 : 1);
 }
-
 /* Apply only the setting being previewed. The old generic settings_apply()
  * reloaded the current font and fsync'd sndgain.txt after every Left/Right press,
  * even for unrelated toggles. Persistent brightness/volume writes are deferred
  * until menu exit; their on-screen preview remains immediate. */
+/* Live-volume debounce: the slider applies the level audibly on EVERY step
+ * (hardware mirror), but commits the durable persistentmem write at most once
+ * per VOLUME_COMMIT_MS while the user is still sliding, plus a final commit
+ * shortly after the last step - so the physical volume meter follows the
+ * slider in real time, without one EEPROM write per repeat step.  A step that
+ * arrives later than the window commits immediately (slow adjustment = live
+ * commit too).  The menu-exit path (settings_save_file) still writes the
+ * final value unconditionally, covering any remaining edge. */
+#define VOLUME_COMMIT_MS 500
+static long long volume_last_commit_ms = 0;
+static int volume_committed_level = -1;
+static void settings_volume_commit_live(void) {
+    long long now = monotonic_ms();
+    if (settings_volume == volume_committed_level)
+        return;   /* nothing new to persist */
+    if (now - volume_last_commit_ms < VOLUME_COMMIT_MS &&
+        volume_committed_level >= 0)
+        return;   /* inside the debounce window; next step (or the final
+                     commit below) will persist it */
+    volume_last_commit_ms = now;
+    volume_committed_level = settings_volume;
+    settings_write_volume();
+}
+static void settings_volume_commit_final(void) {
+    volume_committed_level = -1;   /* force a real commit check on next slide */
+    volume_last_commit_ms = monotonic_ms();
+}
+
 static void settings_preview_row(const SRow *r) {
     if (!r) return;
     switch (r->type) {
@@ -1168,19 +1197,22 @@ static void settings_preview_row(const SRow *r) {
         theme_sync_artwork_pack();
         break;
     case RT_FONT:
-        if (font_count > 0) font_load_file(font_files[settings_font_idx]);
+        if (font_count > 0)
+            font_load_file(font_files[settings_font_idx]);
         break;
     case RT_RANGE:
         if (r->val == &settings_brightness)
             cube_set_backlight(settings_brightness);
         else if (r->val == &settings_background_dim)
             banner_set_dim(settings_background_dim);
-        else if (r->val == &settings_volume)
-            /* Live preview ONLY (hardware mirror, no EEPROM write): the slider
-             * repeats many steps per adjustment and persistentmem is
-             * EEPROM-like - the durable pmem write happens once, when the
-             * adjustment is confirmed at menu exit (settings_save_file). */
+        else if (r->val == &settings_volume) {
+            /* Live on EVERY step: the hardware mirror makes the change
+             * audible immediately, and the debounced commit keeps the
+             * stored value (physical meter) following the slider in
+             * real time without per-step EEPROM writes. */
             cube_volume_preview(settings_volume);
+            settings_volume_commit_live();
+        }
         break;
     case RT_TOGGLE:
         if (r->val == &settings_anim) banner_set_anim(settings_anim);
@@ -3211,6 +3243,7 @@ static void handle_settings_menu(void) {
     if ((input_was_pressed(FROG_BTN_A) && settings_rows[settings_menu_idx].type != RT_ACTION) ||
          input_was_pressed(FROG_BTN_B)) {
         settings_save_file();
+        settings_volume_commit_final();   /* reset the live-commit debounce state */
         settings_menu_active = false;
         /* re-scan root so a hide-empty-folders change takes effect now */
         resolve_roms_root();
@@ -4559,6 +4592,33 @@ void retro_run(void) {
     if (settings_bl_reassert > 0) {
         cube_set_backlight(settings_brightness);
         settings_bl_reassert--;
+    }
+    /* Live-volume tail commit: the debounced slider path (500 ms) can leave
+     * the newest level applied to the hardware mirror but not yet persisted
+     * when the user stops sliding.  Commit it once the window has passed, so
+     * the stored value (physical meter, next boot) always catches up without
+     * waiting for a menu exit. */
+    if (settings_volume != volume_committed_level &&
+        monotonic_ms() - volume_last_commit_ms >= VOLUME_COMMIT_MS) {
+        volume_committed_level = -1;   /* force the real write below */
+        settings_volume_commit_live();
+    }
+    /* Reverse link: the physical volume buttons (cubevol) change the stored
+     * pmem value out from under us at any moment.  Poll it while the
+     * Settings menu is open so the slider DISPLAY follows the buttons in
+     * real time too - one value everywhere, whichever side changed it.
+     * (picoarch does the same for the in-game path; this covers the UI.) */
+    if (settings_menu_active) {
+        static long long volume_poll_ms = 0;
+        long long now = monotonic_ms();
+        if (now - volume_poll_ms >= 250) {
+            volume_poll_ms = now;
+            int shared = cube_pmem_volume_read();
+            if (shared >= 0 && shared <= 100 && shared != settings_volume) {
+                settings_volume = shared;
+                volume_committed_level = shared;   /* it is already stored */
+            }
+        }
     }
     /* cubevol can restore its stored I2SO level shortly after boot.  Keep the
        idle launcher mute asserted through that window, without changing the
