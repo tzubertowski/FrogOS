@@ -1223,6 +1223,29 @@ static void settings_preview_row(const SRow *r) {
 }
 
 static void settings_load_file(void) {
+    /* Adopt the shared system volume BEFORE parsing the saved file, and
+     * regardless of whether that file can be opened: the physical volume
+     * buttons' pmem slot is the single source of truth.  Reading it only
+     * after a successful open let a missing/corrupt/replaced settings.txt
+     * leave the boot default (100) in settings_volume, which settings_apply
+     * would then persist over the user's actual physical level. */
+    {
+        int shared_vol = cube_pmem_volume_read();
+        if (shared_vol >= 0 && shared_vol <= 100) {
+            settings_volume = shared_vol;
+        } else {
+            /* pmem unreadable (old root / device failure): fall back to the
+             * legacy software-gain file, matching what picoarch itself
+             * loads at game start.  Absent file keeps the boot default. */
+            FILE *g = fopen("/mnt/sdcard/cubegm/sndgain.txt", "r");
+            if (g) {
+                int v;
+                if (fscanf(g, "%d", &v) == 1 && v >= 0 && v <= 100)
+                    settings_volume = v;
+                fclose(g);
+            }
+        }
+    }
     FILE *f = fopen(SETTINGS_FILE, "r");
     if (!f) return;
     char line[256];
@@ -1331,8 +1354,11 @@ static void settings_load_file(void) {
     }
     fclose(f);
     /* The shared system volume (cubevol persistentmem - what the PHYSICAL
-     * volume buttons last set) always wins over our saved copy: the user
-     * may have changed it with the buttons since the last Settings visit. */
+     * volume buttons last set) still wins over our saved copy: the user
+     * may have changed it with the buttons since the last Settings visit.
+     * (The pre-parse read above already covered the missing-file case;
+     * this re-read also overrides a stale volume= line, preserving the
+     * pre-existing precedence.) */
     int shared_vol = cube_pmem_volume_read();
     if (shared_vol >= 0 && shared_vol <= 100)
         settings_volume = shared_vol;
@@ -2583,9 +2609,34 @@ static void write_picoarch_skin(void) {
     fclose(s);
 }
 
+/* One volume everywhere, at the moment it matters: right before handing the
+ * audio path to the next program.  Physical volume presses (cubevol) change
+ * the pmem level while the UI is idle (outside Settings, where the reverse-
+ * link poll mirrors them); picoarch reads pmem itself, but the legacy
+ * standalone frontends (pcsx4all, lgpt) re-read cubegm/sndgain.txt on every
+ * launch and would otherwise start with a stale software gain.  Adopt the
+ * live pmem level and refresh sndgain.txt so every consumer sees one value.
+ * EEPROM-safe: the pmem slot is only read; sndgain.txt is rewritten only when
+ * it actually differs. */
+static void shared_volume_sync_before_launch(void) {
+    int shared = cube_pmem_volume_read();
+    if (shared < 0 || shared > 100) return;   /* unreadable: keep our state */
+    settings_volume = shared;
+    volume_committed_level = shared;
+    FILE *f = fopen("/mnt/sdcard/cubegm/sndgain.txt", "r");
+    if (f) {
+        int cur = -1;
+        int ok = fscanf(f, "%d", &cur) == 1;
+        fclose(f);
+        if (ok && cur == shared) return;      /* already in sync */
+    }
+    cube_volume_mirror_sndgain(shared);
+}
+
 static void request_game_launch(const char *core_path, const char *rom_path) {
     fb1_clear_all();
     cube_set_i2so_output_muted(0);  /* game owns the audio path after exec */
+    shared_volume_sync_before_launch();
     write_picoarch_skin();
     FILE *f = fopen(LAUNCH_FILE, "w");
     if (!f) { dbg("failed to write launch file"); return; }
@@ -2609,6 +2660,7 @@ static void request_standalone_launch(const char *bin_path, const char *rom_path
     dbg("standalone_launch: start");
     fb1_clear_all();
     cube_set_i2so_output_muted(0);  /* standalone app owns the audio path */
+    shared_volume_sync_before_launch();
     write_picoarch_skin();
     FILE *f = fopen(LAUNCH_FILE, "w");
     if (!f) { dbg("standalone_launch: fopen failed"); return; }
@@ -2642,6 +2694,7 @@ static void request_builtin_launch(const char *bin_path) {
     dbg("builtin_launch: start");
     fb1_clear_all();
     cube_set_i2so_output_muted(0);  /* built-in standalone app may use audio */
+    shared_volume_sync_before_launch();
     FILE *f = fopen(LAUNCH_FILE, "w");
     if (!f) { dbg("builtin_launch: fopen failed"); return; }
     fprintf(f, "standalone\n%s\n\n", bin_path);
@@ -4604,17 +4657,19 @@ void retro_run(void) {
         settings_volume_commit_live();
     }
     /* Reverse link: the physical volume buttons (cubevol) change the stored
-     * pmem value out from under us at any moment.  Poll it while the
-     * Settings menu is open so the slider DISPLAY follows the buttons in
-     * real time too - one value everywhere, whichever side changed it.
-     * (picoarch does the same for the in-game path; this covers the UI.)
+     * pmem value out from under us at any moment.  Poll it CONTINUOUSLY, not
+     * just while Settings is open: with the menu closed a press still updates
+     * settings_volume (slider display, saves, sndgain mirror for legacy
+     * standalone frontends), so the stored level and every consumer stay one
+     * value, whichever side changed it.  (picoarch does the same for the
+     * in-game path; this covers the whole UI.)
      * OWN-LAG GUARD: while the debounced slider path is catching up, pmem
      * still holds OUR last committed level - reading it back would bounce
      * the slider to stale values mid-adjustment (seen on-device as
      * 50-45-45-45-40-45-40 when sliding fast).  A read that matches our own
      * last commit is our lag, not a physical press: only adopt values that
      * differ from BOTH the slider and our last commit. */
-    if (settings_menu_active) {
+    {
         static long long volume_poll_ms = 0;
         long long now = monotonic_ms();
         if (now - volume_poll_ms >= 250) {
@@ -4624,6 +4679,12 @@ void retro_run(void) {
                 shared != settings_volume && shared != volume_committed_level) {
                 settings_volume = shared;
                 volume_committed_level = shared;   /* it is already stored */
+                /* The buttons changed the pmem level under us; cube_pmem_
+                 * volume_write would skip the EEPROM write (already in sync)
+                 * AND skip the sndgain.txt refresh, so legacy standalone
+                 * frontends (pcsx4all, lgpt) would launch with the stale
+                 * software gain. Mirror the adopted level explicitly. */
+                cube_volume_mirror_sndgain(shared);
             }
         }
     }

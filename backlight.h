@@ -29,6 +29,11 @@ int cube_pmem_volume_write(int level);
  * is confirmed (cube_pmem_volume_write / settings_write_volume). */
 void cube_volume_preview(int level);
 
+/* Refresh cubegm/sndgain.txt only (legacy software gain for standalone
+ * frontends). Use when persistentmem was changed externally (physical volume
+ * buttons) and the pmem write path would skip the sndgain refresh. */
+void cube_volume_mirror_sndgain(int level);
+
 /* Sync cubevol's persistentmem-stored backlight to `level` (0..100) so its
  * delayed startup apply shows the right brightness. Writes EEPROM only on real
  * change — call on brightness change / boot, NOT every frame. */

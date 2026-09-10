@@ -118,6 +118,18 @@ void cube_set_i2so_output_muted(int muted) {
     }
 }
 
+/* Refresh cubegm/sndgain.txt (legacy software gain for standalone frontends
+ * like pcsx4all/lgpt, re-read on each launch) without touching persistentmem
+ * or the I2SO hardware. Used when a physical volume press changed the stored
+ * level under us: cube_pmem_volume_write would skip everything because the
+ * pmem slot already matches. */
+void cube_volume_mirror_sndgain(int level) {
+    if (level < 0)   level = 0;
+    if (level > 100) level = 100;
+    FILE *f = fopen("/mnt/sdcard/cubegm/sndgain.txt", "w");
+    if (f) { fprintf(f, "%d\n", level); fclose(f); }
+}
+
 /* Write the SHARED system volume: cubevol's persistentmem slot (what the
  * physical volume buttons use) + the I2SO hardware volume (same ioctl a
  * cubevol button press applies, via the existing helper above) + legacy
@@ -131,7 +143,15 @@ void cube_set_i2so_output_muted(int muted) {
 int cube_pmem_volume_write(int level) {
     if (level < 0)   level = 0;
     if (level > 100) level = 100;
-    if (cube_pmem_volume_read() == level) return 0;   /* already in sync */
+    if (cube_pmem_volume_read() == level) {
+        /* pmem already in sync (e.g. the physical buttons set it, or a
+         * redundant commit): the EEPROM write is skipped, but the legacy
+         * sndgain.txt may still hold an older level - refresh it so every
+         * consumer (older picoarch, standalone frontends) reads one value.
+         * A plain SD file rewrite; no EEPROM wear. */
+        cube_volume_mirror_sndgain(level);
+        return 0;   /* already in sync */
+    }
     int rv = -1;
     int fd = open("/dev/persistentmem", O_RDWR);
     if (fd >= 0) {
@@ -158,8 +178,7 @@ int cube_pmem_volume_write(int level) {
      * the persistent write failed: the user hears what the slider shows;
      * the failed STORED value is what the return code reports. */
     cube_set_i2so_volume(level);
-    FILE *f = fopen("/mnt/sdcard/cubegm/sndgain.txt", "w");
-    if (f) { fprintf(f, "%d\n", level); fclose(f); }
+    cube_volume_mirror_sndgain(level);
     return rv;
 }
 
