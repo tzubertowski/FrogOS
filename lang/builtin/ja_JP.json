@@ -36,6 +36,7 @@
   "settings.background_image_fit": "背景イメージのフィット",
   "settings.hide_extensions": "拡張子を隠す",
   "settings.hide_empty_folders": "空フォルダを隠す",
+  "settings.custom_aspect_ratios": "すべての縦横比",
   "settings.library": "ライブラリ",
   "settings.rom_source": "ROMソース",
   "settings.otg_storage": "OTGストレージ",
