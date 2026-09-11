@@ -15,6 +15,8 @@ void font_load_file(const char *font_filename);
 
 // Change the active UI font size and invalidate cached glyphs.
 void font_set_size(int pixels);
+
+// Retrieve current base UI font size in points/pixels.
 int font_get_size(void);
 
 /* Select one face for the entire UI when the chosen language needs glyphs
@@ -22,12 +24,12 @@ int font_get_size(void);
 void font_sync_language_fallback(void);
 
 // Draw a single character at position (x, y) with given color
-void font_draw_char(uint16_t *framebuffer, int screen_width, int screen_height, 
-                   int x, int y, char c, uint16_t color);
+void font_draw_char(uint16_t *framebuffer, int screen_width, int screen_height,
+                    int x, int y, char c, uint16_t color);
 
 // Draw a text string at position (x, y) with given color
 void font_draw_text(uint16_t *framebuffer, int screen_width, int screen_height,
-                   int x, int y, const char *text, uint16_t color);
+                    int x, int y, const char *text, uint16_t color);
 
 // Measure text width in pixels
 int font_measure_text(const char *text);
@@ -36,12 +38,9 @@ int font_measure_text(const char *text);
 // cap_height (pixel height of capitals = the visible ink band).
 void font_cap_metrics(int *baseline_out, int *cap_height_out);
 
-// Get font character width/height — scale with UI_SCALE
+// Get font character width/height - scale with UI_SCALE
 #ifndef UI_SCALE
 #define UI_SCALE 100
 #endif
-#define FONT_CHAR_WIDTH    (23 * UI_SCALE / 100)
-#define FONT_CHAR_HEIGHT   (26 * UI_SCALE / 100)
-#define FONT_CHAR_SPACING  (13 * UI_SCALE / 100)
 
 #endif // FONT_H

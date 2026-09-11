@@ -1,12 +1,10 @@
 #include "render.h"
-#include "theme.h"
 #include "font.h"
 #include "common/i18n.h"
 #include "stb_image.h"   /* decls only; impl lives in banner.c */
 #include <string.h>
 #include <stdlib.h>
 #include <stdio.h>
-#include <math.h>
 #include <unistd.h>
 #include <dirent.h>
 #include <sys/stat.h>
@@ -105,27 +103,22 @@ void render_text_pillbox(uint16_t *framebuffer, int x, int y, const char *text,
                         uint16_t bg_color, uint16_t text_color, int padding) {
     if (!framebuffer || !text) return;
 
-    // Calculate text dimensions using proper measurement
-    int text_width = font_measure_text(text);
-    int text_height = FONT_CHAR_HEIGHT;
-
-    // Calculate pillbox dimensions - left padding stays at 6, right padding uses parameter
-    int left_padding = 6;
-    int pillbox_width = text_width + left_padding + padding; // padding only on right
-    int pillbox_height = text_height + padding;
-    int pillbox_x = x - left_padding;
-    /* Center pill on the cap-ink midline (text is uppercased, so visible ink is
-     * [y+baseline-cap, y+baseline]) rather than the em-box, which has dead
-     * descender space below and made text look top-heavy. */
     int baseline, cap_h;
     font_cap_metrics(&baseline, &cap_h);
-    int ink_center = y + baseline - cap_h / 2;
-    int pillbox_y = ink_center - pillbox_height / 2;
+    int text_width = font_measure_text(text);
 
-    // Draw pillbox background
-    render_rounded_rect(framebuffer, pillbox_x, pillbox_y, pillbox_width, pillbox_height, 8, bg_color);
-    
-    // Draw text
+    int pad_x = padding;
+    int pad_y = padding;
+
+    // Total box height based on actual cap height
+    int pillbox_width = text_width + (pad_x * 2);
+    int pillbox_height = cap_h + (pad_y * 2);
+
+    int pillbox_x = x - pad_x;
+    // Offset pillbox background to bound text vertically
+    int pillbox_y = y + (baseline - cap_h) - pad_y;
+
+    render_rounded_rect(framebuffer, pillbox_x, pillbox_y, pillbox_width, pillbox_height, 6, bg_color);
     font_draw_text(framebuffer, SCREEN_WIDTH, SCREEN_HEIGHT, x, y, text, text_color);
 }
 

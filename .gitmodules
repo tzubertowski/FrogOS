@@ -1,0 +1,6 @@
+[submodule "external/harfbuzz"]
+	path = external/harfbuzz
+	url = https://github.com/harfbuzz/harfbuzz.git
+[submodule "external/SheenBidi"]
+	path = external/SheenBidi
+	url = https://github.com/Tehreer/SheenBidi.git

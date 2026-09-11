@@ -4,3 +4,4 @@ venv/
 _libretro*
 __pycache__/
 *.so
+out/
